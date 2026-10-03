@@ -85,10 +85,10 @@ const (
 	AnnotationBaseDigest  = "org.opencontainers.image.base.digest"
 	AnnotationSource      = "org.opencontainers.image.source"
 	AnnotationDescription = "org.opencontainers.image.description"
-	AnnotationConverter   = "io.github.ahimsalabs.kiki.converter"
+	AnnotationConverter   = "net.ahimsalabs.kiki.converter"
 	// On each layer descriptor: the source layer's digest and diff_id.
-	AnnotationLayerSourceDigest = "io.github.ahimsalabs.kiki.source.digest"
-	AnnotationLayerSourceDiffID = "io.github.ahimsalabs.kiki.source.diff-id"
+	AnnotationLayerSourceDigest = "net.ahimsalabs.kiki.source.digest"
+	AnnotationLayerSourceDiffID = "net.ahimsalabs.kiki.source.diff-id"
 )
 
 // sourceRepo is the repository that holds the publisher, which ghcr.io
@@ -147,7 +147,8 @@ type Options struct {
 	DryRun bool
 	// CheckOnly reports whether Dest has the index converted from this
 	// source by this converter, converting and pushing nothing; Ref is
-	// empty when it does not.
+	// empty when it does not, and Current says whether every one of Tags
+	// already points at it.
 	CheckOnly bool
 	// Remote are go-containerregistry's options for both registries
 	// (auth, transport); Publish adds the context.
@@ -166,6 +167,9 @@ type Result struct {
 	Found bool `json:"found"`
 	// Pushed is false when Dest already had it (or DryRun, CheckOnly).
 	Pushed bool `json:"pushed"`
+	// Current is true, with CheckOnly, when Dest had it and every one of
+	// Options.Tags already points at it: publishing would move no tag.
+	Current bool `json:"current"`
 }
 
 // Publish converts opts.Source and pushes it to opts.Dest, or finds it
@@ -217,6 +221,7 @@ func Publish(ctx context.Context, opts Options) (*Result, error) {
 			res.Found = true
 			opts.Logger.Info("already published", "source", res.Source, "ref", res.Ref)
 			if opts.CheckOnly {
+				res.Current = tagged(dest, opts.Tags, pub.digest, ropts)
 				return res, nil
 			}
 			if err := tagAll(dest, opts.Tags, pub.idx, ropts); err != nil {
@@ -325,6 +330,18 @@ func tagAll(dest name.Repository, tags []string, idx v1.ImageIndex, ropts []remo
 		}
 	}
 	return nil
+}
+
+// tagged reports whether every one of tags in dest points at digest. Any
+// failure to read one means it does not.
+func tagged(dest name.Repository, tags []string, digest v1.Hash, ropts []remote.Option) bool {
+	for _, t := range tags {
+		d, err := remote.Head(dest.Tag(t), ropts...)
+		if err != nil || d.Digest != digest {
+			return false
+		}
+	}
+	return true
 }
 
 // Copy pushes the index src, which Publish made (in a staging registry,

@@ -222,8 +222,8 @@ func TestPublish(t *testing.T) {
 
 	// Staged there, it is copied to another repository unchanged, which
 	// a check then finds.
-	final := Options{Source: src, Dest: host + "/final/img", CheckOnly: true, Logger: opts.Logger}
-	if c, err := Publish(t.Context(), final); err != nil || c.Found || c.Ref != "" || c.Pushed {
+	final := Options{Source: src, Dest: host + "/final/img", Tags: []string{"stable"}, CheckOnly: true, Logger: opts.Logger}
+	if c, err := Publish(t.Context(), final); err != nil || c.Found || c.Ref != "" || c.Pushed || c.Current {
 		t.Fatalf("check before copy: %+v, %v", c, err)
 	}
 	cp, err := Copy(t.Context(), res.Ref, final.Dest, []string{"stable"}, nil, opts.Logger)
@@ -240,8 +240,13 @@ func TestPublish(t *testing.T) {
 			t.Errorf("copied tag %s: %v, %v", tag, d, err)
 		}
 	}
-	if c, err := Publish(t.Context(), final); err != nil || !c.Found || c.Ref != cp.Ref || c.Pushed {
+	if c, err := Publish(t.Context(), final); err != nil || !c.Found || c.Ref != cp.Ref || c.Pushed || !c.Current {
 		t.Errorf("check after copy: %+v, %v", c, err)
+	}
+	// A tag that has yet to move to it is not current.
+	final.Tags = []string{"stable", "next"}
+	if c, err := Publish(t.Context(), final); err != nil || !c.Found || c.Current {
+		t.Errorf("check with a tag to move: %+v, %v", c, err)
 	}
 	// Copy takes only what Publish made, by digest.
 	if _, err := Copy(t.Context(), src, final.Dest, nil, nil, opts.Logger); err == nil {

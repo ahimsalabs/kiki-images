@@ -2,15 +2,18 @@ name: Publish
 
 # Publishes kiki's catalog images again with native EROFS layers
 # (internal/imagepub) to ghcr.io/ahimsalabs/kiki/<name>, for linux/amd64
-# and linux/arm64. Each image is converted into a staging registry on the
-# runner, checked there (every layer mounted and compared with the source
-# tar layer it came from, entry for entry), and only then copied to
-# ghcr.io unchanged. A source ghcr.io already holds, converted by this
-# converter, is not converted again.
+# and linux/arm64. kiki's catalog names these repositories by tag, not
+# digest, and hosts pull whatever latest is, so a moving tag (latest, 3.12)
+# moves only to an index this run has verified: every layer mounted and
+# compared with the source tar layer it came from, entry for entry. A new
+# source is converted into a staging registry on the runner and verified
+# there, then copied to ghcr.io unchanged; a source ghcr.io already holds,
+# converted by this converter, is verified there before a tag moves to it,
+# and left alone when every tag already points at it.
 #
-# The schedule is the refresh path: when upstream exeuntu's latest moves,
-# the new source is published here, and kiki's own images workflow
-# validates it with kiki's resolver and proposes the catalog bump.
+# The schedule is the refresh path: when upstream's tag moves, the new
+# source is published here. kiki's own canary workflow then checks the
+# merged rootfs of whatever latest is against its source's.
 
 on:
   workflow_dispatch:
@@ -49,11 +52,12 @@ jobs:
           # kiki's default and exeuntu images: upstream's latest.
           - name: exeuntu
             source: ghcr.io/boldsoftware/exeuntu:latest
-            tag: latest
-          # kiki's minimal image: python:3.12's index, pinned.
+            tags: latest
+          # kiki's minimal image: python:3.12 as it moves; latest is the
+          # Python kiki's catalog takes.
           - name: python
-            source: index.docker.io/library/python@sha256:4d1caded1f729ae443eb803f26ffde7b61e696aeaef62f099abb6dd6b14257c7
-            tag: '3.12'
+            source: index.docker.io/library/python:3.12
+            tags: latest,3.12
     services:
       stage:
         image: registry:2.8.3
@@ -96,18 +100,21 @@ jobs:
       - name: Check ghcr.io
         id: check
         run: |
-          "$RUNNER_TEMP/kiki-imagepub" -check -source "${{ matrix.source }}" -dest "$DEST" | tee check.json
+          "$RUNNER_TEMP/kiki-imagepub" -check -source "${{ matrix.source }}" -dest "$DEST" \
+            -tag "${{ matrix.tags }}" | tee check.json
           source=$(jq -er .source check.json)
           found=$(jq -r .found check.json)
+          current=$(jq -r .current check.json)
           ref=$(jq -r .ref check.json)
-          case $found in
-          true) [ -n "$ref" ] || { echo "found without a ref" >&2; exit 1; } ;;
-          false) ;;
-          *) echo "found is $found" >&2; exit 1 ;;
+          case $found/$current in
+          true/true | true/false) [ -n "$ref" ] || { echo "found without a ref" >&2; exit 1; } ;;
+          false/false) ;;
+          *) echo "found is $found, current $current" >&2; exit 1 ;;
           esac
           {
             echo "source=$source"
             echo "found=$found"
+            echo "current=$current"
             echo "ref=$ref"
           } >> "$GITHUB_OUTPUT"
       - name: Build erofs-utils
@@ -133,16 +140,27 @@ jobs:
             -workdir "$WORK" -force | tee stage.json
           ref=$(jq -er .ref stage.json)
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-      - name: Verify the staged image
-        if: steps.stage.outcome == 'success'
+      - name: Verify
+        # The gate on every tag move: the staged index, or the one ghcr.io
+        # already holds for this source (read with the login above, which
+        # root's environment lacks).
+        id: verify
+        if: steps.check.outputs.current != 'true' || env.FORCE == 'true'
+        env:
+          REF: ${{ steps.stage.outputs.ref || steps.check.outputs.ref }}
         run: |
+          [ -n "$REF" ] || { echo "nothing to verify" >&2; exit 1; }
           sudo modprobe erofs
-          sudo "$RUNNER_TEMP/kiki-imagepub" -verify "${{ steps.stage.outputs.ref }}" -workdir "$WORK"
+          sudo DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" "$RUNNER_TEMP/kiki-imagepub" -verify "$REF" -workdir "$WORK"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
       - name: Copy to ghcr.io
+        # Only what Verify checked, by digest.
         id: copy
+        if: steps.verify.outcome == 'success'
+        env:
+          REF: ${{ steps.verify.outputs.ref }}
         run: |
-          ref=${{ steps.stage.outputs.ref || steps.check.outputs.ref }}
-          "$RUNNER_TEMP/kiki-imagepub" -copy "$ref" -dest "$DEST" -tag "${{ matrix.tag }}" | tee published.json
+          "$RUNNER_TEMP/kiki-imagepub" -copy "$REF" -dest "$DEST" -tag "${{ matrix.tags }}" | tee published.json
           digest=$(jq -er '.ref | split("@")[1]' published.json)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           {
@@ -156,8 +174,10 @@ jobs:
         # private, whatever its repository's visibility; an org admin then
         # makes it public, once per package.
         env:
-          DIGEST: ${{ steps.copy.outputs.digest }}
+          REF: ${{ steps.copy.outputs.digest && format('{0}@{1}', env.DEST, steps.copy.outputs.digest) || steps.check.outputs.ref }}
         run: |
+          DIGEST=${REF#*@}
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no published digest in '$REF'" >&2; exit 1; }
           repo=${DEST#ghcr.io/}
           pkg=${repo#ahimsalabs/}
           token=$(curl -fsS "https://ghcr.io/token?scope=repository:$repo:pull" | jq -r '.token // empty')

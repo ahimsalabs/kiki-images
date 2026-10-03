@@ -7,7 +7,7 @@ converting a tar:
 | Package | Source | Tags |
 | --- | --- | --- |
 | `ghcr.io/ahimsalabs/kiki/exeuntu` | [`ghcr.io/boldsoftware/exeuntu`](https://github.com/boldsoftware/exeuntu) `latest` | `latest`, `source-sha256-<source index>` |
-| `ghcr.io/ahimsalabs/kiki/python` | [`python:3.12`](https://hub.docker.com/_/python) (index `sha256:4d1caded…57c7`) | `3.12`, `source-sha256-<source index>` |
+| `ghcr.io/ahimsalabs/kiki/python` | [`python:3.12`](https://hub.docker.com/_/python) | `latest`, `3.12`, `source-sha256-<source index>` |
 
 Each is an OCI index for linux/amd64 and linux/arm64. Each layer is containerd's native EROFS
 layer (`mkfs.erofs --tar=f --aufs -Enoinline_data`, the EROFS differ's form), compressed with
@@ -26,7 +26,7 @@ for byte.
 - **Traceable.** The index and each manifest carry `org.opencontainers.image.base.name` and
   `org.opencontainers.image.base.digest` (the source index, and each platform's source
   manifest), `org.opencontainers.image.source` (this repository) and
-  `io.github.ahimsalabs.kiki.converter` (the format revision, mkfs.erofs's version and flags, the
+  `net.ahimsalabs.kiki.converter` (the format revision, mkfs.erofs's version and flags, the
   zstd module's version). Each layer descriptor names the source layer's digest and diff_id.
   The tag `source-sha256-<hex>` names the source index.
 - **Checked.** Every blob passes `fsck.erofs --extract` (all of its data read) before it is
@@ -38,19 +38,25 @@ for byte.
   tar names a path below it but not it) over a lower layer's directory, whose mode, owner and
   time it would replace in an overlay (the layer's root aside, which kiki takes as implicit),
   and a whiteout of a path the same layer holds. Only then is the index copied to ghcr.io,
-  unchanged. A layer the pinned mkfs.erofs cannot
-  convert (1.9.3 refuses a `.wh..wh..opq` at the layer's root, for one) fails the run, and
-  nothing is pushed.
-- **Validated by its consumer.** kiki checks a published index again with its own resolver (its
-  merged rootfs must equal the source's, entry for entry) before its catalog pins the digest.
+  unchanged. A layer the pinned mkfs.erofs cannot convert (1.9.3 refuses a `.wh..wh..opq` at the
+  layer's root, for one) fails the run, and nothing is pushed.
+- **Tags move only to a verified index.** kiki's catalog names these repositories by tag
+  (`latest`), not digest, and each host pulls what the tag points at when it creates a VM. So a
+  moving tag (`latest`, `3.12`) moves only to an index the same run has verified as above: a
+  new source's staged index, or, for a source ghcr.io already holds, that index as ghcr.io
+  serves it. A run that finds every tag already on its source's index moves nothing.
+- **Checked again by its consumer.** Every kiki host validates each native layer as it pulls it,
+  and kiki's daily canary workflow pulls whatever `latest` is through kiki's own resolver and
+  checks that its merged rootfs equals the source's, entry for entry, opening an issue in kiki
+  when it does not.
 
 ## Publishing
 
 `.github/workflows/publish.yml` runs daily and on demand (`gh workflow run publish.yml`, with
 `-f force=true` to convert a source already published). A source ghcr.io already holds,
-converted by the same converter id, is only re-tagged; when exeuntu's `latest` moves, the new
-source is converted and `latest` moves with it. kiki's own workflow then validates the new
-digest and proposes the catalog bump for review.
+converted by the same converter id, is verified and re-tagged, not converted; when exeuntu's
+`latest` or `python:3.12` moves upstream, the new source is converted, verified, and the tags
+move with it.
 
 Hosts pull anonymously, so the packages must be public. ghcr.io links each package to this
 repository (`org.opencontainers.image.source`); a new package may still start private, and an
