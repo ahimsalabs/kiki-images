@@ -1,0 +1,169 @@
+name: Publish
+
+# Publishes kiki's catalog images again with native EROFS layers
+# (internal/imagepub) to ghcr.io/ahimsalabs/kiki/<name>, for linux/amd64
+# and linux/arm64. Each image is converted into a staging registry on the
+# runner, checked there (every layer mounted and compared with the source
+# tar layer it came from, entry for entry), and only then copied to
+# ghcr.io unchanged. A source ghcr.io already holds, converted by this
+# converter, is not converted again.
+#
+# The schedule is the refresh path: when upstream exeuntu's latest moves,
+# the new source is published here, and kiki's own images workflow
+# validates it with kiki's resolver and proposes the catalog bump.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Convert and push even if ghcr.io already has the source converted by this converter
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # bash -eo pipefail: a failed kiki-imagepub fails its step, tee or not.
+    shell: bash
+
+jobs:
+  publish:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # kiki's default and exeuntu images: upstream's latest.
+          - name: exeuntu
+            source: ghcr.io/boldsoftware/exeuntu:latest
+            tag: latest
+          # kiki's minimal image: python:3.12's index, pinned.
+          - name: python
+            source: index.docker.io/library/python@sha256:4d1caded1f729ae443eb803f26ffde7b61e696aeaef62f099abb6dd6b14257c7
+            tag: '3.12'
+    services:
+      stage:
+        image: registry:2.8.3
+        ports:
+          - 5000:5000
+    env:
+      DEST: ghcr.io/ahimsalabs/kiki/${{ matrix.name }}
+      STAGE: localhost:5000/kiki/${{ matrix.name }}
+      FORCE: ${{ inputs.force && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Work directory
+        # A converted exeuntu is about 3.5 GB compressed, staged beside
+        # the converted layers and the largest uncompressed one.
+        # ubuntu-24.04 leaves about 12 GB free on / and may have no /mnt,
+        # so first drop toolchains this job never uses.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune -af >/dev/null
+          dir=$RUNNER_TEMP/work
+          if [ -d /mnt ] && [ "$(df --output=avail -B1 /mnt | tail -1)" -gt "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1)" ]; then
+            sudo mkdir -p /mnt/kiki-images
+            sudo chown "$(id -u):$(id -g)" /mnt/kiki-images
+            dir=/mnt/kiki-images
+          fi
+          mkdir -p "$dir/tmp"
+          echo "TMPDIR=$dir/tmp" >> "$GITHUB_ENV"
+          echo "WORK=$dir" >> "$GITHUB_ENV"
+          df -h "$dir" "$RUNNER_TEMP"
+      - name: Build kiki-imagepub
+        run: go build -o "$RUNNER_TEMP/kiki-imagepub" ./cmd/kiki-imagepub
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Check ghcr.io
+        id: check
+        run: |
+          "$RUNNER_TEMP/kiki-imagepub" -check -source "${{ matrix.source }}" -dest "$DEST" | tee check.json
+          source=$(jq -er .source check.json)
+          found=$(jq -r .found check.json)
+          ref=$(jq -r .ref check.json)
+          case $found in
+          true) [ -n "$ref" ] || { echo "found without a ref" >&2; exit 1; } ;;
+          false) ;;
+          *) echo "found is $found" >&2; exit 1 ;;
+          esac
+          {
+            echo "source=$source"
+            echo "found=$found"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build erofs-utils
+        if: steps.check.outputs.found != 'true' || env.FORCE == 'true'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq build-essential autoconf automake libtool pkg-config uuid-dev
+          tools/build-erofs-utils.sh "$RUNNER_TEMP/erofs-utils"
+          echo "$RUNNER_TEMP/erofs-utils/bin" >> "$GITHUB_PATH"
+      - name: Allow user namespaces
+        # mkfs.erofs runs as uid 0 in a user namespace (internal/imagepub);
+        # Ubuntu's AppArmor restricts unprivileged ones.
+        if: steps.check.outputs.found != 'true' || env.FORCE == 'true'
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Convert into the staging registry
+        id: stage
+        if: steps.check.outputs.found != 'true' || env.FORCE == 'true'
+        run: |
+          "$RUNNER_TEMP/kiki-imagepub" -source "${{ steps.check.outputs.source }}" -dest "$STAGE" \
+            -workdir "$WORK" -force | tee stage.json
+          ref=$(jq -er .ref stage.json)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Verify the staged image
+        if: steps.stage.outcome == 'success'
+        run: |
+          sudo modprobe erofs
+          sudo "$RUNNER_TEMP/kiki-imagepub" -verify "${{ steps.stage.outputs.ref }}" -workdir "$WORK"
+      - name: Copy to ghcr.io
+        id: copy
+        run: |
+          ref=${{ steps.stage.outputs.ref || steps.check.outputs.ref }}
+          "$RUNNER_TEMP/kiki-imagepub" -copy "$ref" -dest "$DEST" -tag "${{ matrix.tag }}" | tee published.json
+          digest=$(jq -er '.ref | split("@")[1]' published.json)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $DEST"
+            echo '```json'
+            cat published.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check anonymous pull
+        # kiki hosts pull anonymously. ghcr.io may make a new package
+        # private, whatever its repository's visibility; an org admin then
+        # makes it public, once per package.
+        env:
+          DIGEST: ${{ steps.copy.outputs.digest }}
+        run: |
+          repo=${DEST#ghcr.io/}
+          pkg=${repo#ahimsalabs/}
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:$repo:pull" | jq -r '.token // empty')
+          if [ -z "$token" ] || ! curl -fsS -o /dev/null -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' "https://ghcr.io/v2/$repo/manifests/$DIGEST"; then
+            echo "::error::$DEST@$DIGEST is not anonymously pullable: make the package public at https://github.com/orgs/ahimsalabs/packages/container/package/${pkg//\//%2F}/settings"
+            exit 1
+          fi
+          echo "$DEST@$DIGEST is anonymously pullable."

@@ -1,0 +1,24 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Build kiki-imagepub
+    cmds:
+      - go build -o bin/kiki-imagepub ./cmd/kiki-imagepub
+
+  test:
+    desc: Run the tests (TestPublish needs Linux and mkfs.erofs 1.9.3; as root it also mounts)
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: Vet, for this platform and for Linux
+    cmds:
+      - go vet ./...
+      - GOOS=linux go vet ./...
+      - test -z "$(gofmt -l .)"
+
+  erofs-utils:
+    desc: Build erofs-utils 1.9.3 into .erofs-utils (Linux)
+    cmds:
+      - tools/build-erofs-utils.sh .erofs-utils

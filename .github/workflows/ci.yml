@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build erofs-utils
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq build-essential autoconf automake libtool pkg-config uuid-dev
+          tools/build-erofs-utils.sh "$RUNNER_TEMP/erofs-utils"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        # As root, TestPublish mounts what it published (Verify).
+        run: |
+          sudo modprobe erofs
+          go test -c -o "$RUNNER_TEMP/imagepub.test" ./internal/imagepub
+          sudo KIKI_MKFS_EROFS="$RUNNER_TEMP/erofs-utils/bin/mkfs.erofs" "$RUNNER_TEMP/imagepub.test" -test.v -test.count=1
