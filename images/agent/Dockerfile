@@ -1,5 +1,5 @@
 # check=skip=InvalidDefaultArgInFrom
-# kiki's agent image: Ubuntu 26.04 with systemd, run as exedev, with the
+# kiki's agent image: Ubuntu 26.04 with systemd, run as kikiu, with the
 # tools agents use. Every input is pinned in versions.env (build.sh passes
 # it as build args) and every download is checked against its sha256.
 #
@@ -324,14 +324,14 @@ RUN systemctl mask -- \
 
 # The login user: Ubuntu's uid 1000 renamed, as in exeuntu, with
 # passwordless sudo and a lingering systemd user manager.
-RUN usermod -l exedev -c "kiki agent" ubuntu && \
-	groupmod -n exedev ubuntu && \
-	usermod -d /home/exedev -m exedev && \
-	usermod -aG sudo,docker exedev && \
-	echo 'exedev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/exedev && \
-	chmod 440 /etc/sudoers.d/exedev && \
+RUN usermod -l kikiu -c "kiki agent" ubuntu && \
+	groupmod -n kikiu ubuntu && \
+	usermod -d /home/kikiu -m kikiu && \
+	usermod -aG sudo,docker kikiu && \
+	echo 'kikiu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kikiu && \
+	chmod 440 /etc/sudoers.d/kikiu && \
 	mkdir -p /var/lib/systemd/linger && \
-	touch /var/lib/systemd/linger/exedev
+	touch /var/lib/systemd/linger/kikiu
 
 # The tools, one layer each, independent of everything above.
 COPY --link --from=go /out/ /
@@ -346,8 +346,8 @@ COPY --link --from=agent-browser /out/ /
 COPY --link --from=chrome /out/ /
 COPY --link --from=rust /out/ /
 
-ENV PATH=/home/exedev/.cargo/bin:/home/exedev/.npm-global/bin:/home/exedev/.bun/bin:/home/exedev/go/bin:/home/exedev/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-	NPM_CONFIG_PREFIX=/home/exedev/.npm-global \
+ENV PATH=/home/kikiu/.cargo/bin:/home/kikiu/.npm-global/bin:/home/kikiu/.bun/bin:/home/kikiu/go/bin:/home/kikiu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+	NPM_CONFIG_PREFIX=/home/kikiu/.npm-global \
 	PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
 	AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-shell
 
@@ -362,10 +362,10 @@ RUN mv /etc/apt/ubuntu.sources.live /etc/apt/sources.list.d/ubuntu.sources && \
 	: > /etc/machine-id && \
 	ln -sf /etc/machine-id /var/lib/dbus/machine-id
 
-LABEL exe.dev/login-user="exedev"
+LABEL exe.dev/login-user="kikiu"
 LABEL org.opencontainers.image.source="https://github.com/ahimsalabs/kiki-images"
 LABEL org.opencontainers.image.description="kiki's agent image: Ubuntu 26.04, systemd, and the tools agents use"
-WORKDIR /home/exedev
+WORKDIR /home/kikiu
 # systemd as PID 1: kiki boots an image whose command is systemd in its
 # systemd mode, and mounts cgroup2 and the rest itself.
 CMD ["/sbin/init"]
