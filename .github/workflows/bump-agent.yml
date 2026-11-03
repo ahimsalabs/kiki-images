@@ -1,0 +1,189 @@
+name: Bump agent image
+
+# Keeps the agent image's pins (images/agent/versions.env) current, through
+# one pull request on the branch bot/agent-bump that each run updates:
+#
+#   weekly (Monday)  every tool to its newest release at least three days
+#                    old, the base image's digest and today's apt snapshot
+#   nightly          scans the published source image with Trivy; when it
+#                    finds a HIGH or CRITICAL vulnerability with a fix, bumps
+#                    only what carries it, without the cooldown. Nothing
+#                    fixable: nothing happens
+#   by hand          either, with the cooldown off or Go's minor release
+#                    allowed (gh workflow run bump-agent.yml -f mode=weekly
+#                    -f no_cooldown=true)
+#
+# Build agent image (build-agent.yml) is the pull request's gate. A bump
+# that moves every pin by at most a patch release merges itself once the
+# gate passes; anything larger waits for a review. A vulnerability no
+# release fixes yet is tracked in one issue, closed once none is left.
+#
+# Needs a GitHub App installed on this repository with contents, pull
+# requests and issues write (vars.AGENT_BOT_APP_ID,
+# secrets.AGENT_BOT_PRIVATE_KEY): pull requests opened with GITHUB_TOKEN
+# run no workflows, so the gate would never start. Auto-merge must be
+# allowed in the repository settings, and the build jobs required checks
+# of main.
+
+on:
+  schedule:
+    - cron: '41 5 * * 1' # weekly
+    - cron: '41 4 * * *' # nightly security
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: weekly (every tool) or security (what the scan finds)
+        type: choice
+        options: [weekly, security]
+        default: weekly
+      no_cooldown:
+        description: Take releases however new
+        type: boolean
+        default: false
+      go_minor:
+        description: Allow a new Go minor release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-agent
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BRANCH: bot/agent-bump
+  SOURCE: ghcr.io/ahimsalabs/kiki-src/agent:latest
+  ISSUE_TITLE: 'agent image: vulnerabilities waiting on an upstream release'
+
+jobs:
+  bump:
+    # Skipped, not failed, until the App is set up (see above).
+    if: vars.AGENT_BOT_APP_ID != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Mode
+        id: mode
+        env:
+          CRON: ${{ github.event.schedule }}
+          INPUT: ${{ inputs.mode }}
+        run: |
+          case "${{ github.event_name }}/$CRON" in
+          schedule/'41 5 * * 1') mode=weekly ;;
+          schedule/*) mode=security ;;
+          *) mode=$INPUT ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@v3
+        id: app
+        with:
+          app-id: ${{ vars.AGENT_BOT_APP_ID }}
+          private-key: ${{ secrets.AGENT_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Start from the open bump
+        # A run adds to what an earlier one left unmerged, so the pull
+        # request carries both.
+        run: |
+          cp images/agent/versions.env "$RUNNER_TEMP/main.env"
+          if git fetch -q origin "$BRANCH" 2>/dev/null; then
+            git checkout FETCH_HEAD -- images/agent/versions.env
+          fi
+      - name: Scan the published image
+        if: steps.mode.outputs.mode == 'security'
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNORE_POLICY: images/agent/trivy-ignore.rego
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ env.SOURCE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: json
+          output: trivy.json
+          exit-code: '0'
+      - name: Bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          args=(-versions images/agent/versions.env)
+          if [ "$MODE" = security ]; then args+=(-trivy trivy.json); fi
+          if [ "${{ inputs.no_cooldown }}" = true ]; then args+=(-cooldown 0); fi
+          if [ "${{ inputs.go_minor }}" = true ]; then args+=(-go-minor); fi
+          go run ./cmd/agent-bump "${args[@]}" | tee run.json
+          # The pull request describes all it carries, against main.
+          diff=(-diff "$RUNNER_TEMP/main.env" -versions images/agent/versions.env -summary body.md)
+          if [ "$MODE" = security ]; then diff+=(-trivy trivy.json); fi
+          go run ./cmd/agent-bump "${diff[@]}" | tee pr.json
+          {
+            echo "### $MODE run"
+            echo '```json'
+            cat run.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Pull request
+        id: pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app.outputs.token }}
+          branch: ${{ env.BRANCH }}
+          add-paths: images/agent/versions.env
+          commit-message: 'images/agent: bump pins'
+          title: 'images/agent: bump pins'
+          body-path: body.md
+          labels: agent-bump
+          delete-branch: true
+      - name: Merge rule
+        if: steps.pr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          PR: ${{ steps.pr.outputs.pull-request-number }}
+        run: |
+          level=$(jq -r .level pr.json)
+          gh pr edit "$PR" --remove-label patch,minor,major >/dev/null 2>&1 || true
+          gh label create "$level" --force >/dev/null
+          gh pr edit "$PR" --add-label "$level"
+          if [ "$level" = patch ]; then
+            gh pr merge "$PR" --auto --squash
+          else
+            gh pr merge "$PR" --disable-auto >/dev/null 2>&1 || true
+            echo "Level $level: waits for a review."
+          fi
+      - name: Track what waits on upstream
+        if: steps.mode.outputs.mode == 'security'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          issue=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty')
+          if [ "$(jq '.unfixed | length' pr.json)" -gt 0 ]; then
+            {
+              echo "The nightly scan of \`$SOURCE\` found vulnerabilities whose fix needs a release of their tool that does not exist yet. The bump workflow picks it up the night it appears."
+              echo
+              echo '| Pin | ID | Package | Severity | Fixed in |'
+              echo '| --- | --- | --- | --- | --- |'
+              jq -r '.unfixed[] | "| \(.tool) | \(.id) | \(.package) | \(.severity) | \(.fixed) |"' pr.json
+            } > issue.md
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --body-file issue.md
+            else
+              gh issue create --title "$ISSUE_TITLE" --body-file issue.md
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue close "$issue" --comment "The nightly scan finds nothing left waiting on an upstream release."
+          fi
