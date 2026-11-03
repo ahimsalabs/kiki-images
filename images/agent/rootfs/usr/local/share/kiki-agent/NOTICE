@@ -1,0 +1,6 @@
+kiki agent image
+
+The systemd unit mask list, the systemd, journald and tmpfiles drop-ins, and
+the login user's setup are adapted from exeuntu
+(https://github.com/boldsoftware/exeuntu), Copyright 2026 Bold Software,
+Inc., licensed under the Apache License 2.0.

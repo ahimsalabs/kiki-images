@@ -1,0 +1,18 @@
+#!/bin/bash
+# arch STYLE: the build's architecture (TARGETARCH, amd64 or arm64) as the
+# name a release uses for it.
+#   go      amd64   arm64      (Go, gh, go-task)
+#   node    x64     arm64      (Node.js, agent-browser)
+#   bun     x64     aarch64
+#   gnu     x86_64  aarch64    (Rust targets, uv, jj)
+#   cft     linux64 linux-arm64 (Chrome for Testing)
+set -euo pipefail
+case ${TARGETARCH:?}/$1 in
+amd64/go | arm64/go | arm64/node) echo "$TARGETARCH" ;;
+amd64/node | amd64/bun) echo x64 ;;
+amd64/gnu) echo x86_64 ;;
+arm64/bun | arm64/gnu) echo aarch64 ;;
+amd64/cft) echo linux64 ;;
+arm64/cft) echo linux-arm64 ;;
+*) echo "arch: unknown $TARGETARCH/$1" >&2; exit 1 ;;
+esac
