@@ -13,7 +13,7 @@ test "$(id -un)" = exedev
 sudo -n true
 
 step apt
-! grep -q '^Snapshot:' /etc/apt/sources.list.d/ubuntu.sources
+! grep -q 'snapshot.ubuntu.com' /etc/apt/sources.list.d/ubuntu.sources
 apt-cache policy coreutils-from-uutils | grep -q 'Candidate: (none)'
 
 step versions

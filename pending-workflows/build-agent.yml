@@ -1,0 +1,156 @@
+name: Build agent image
+
+# Builds kiki's agent image (images/agent) natively on amd64 and arm64,
+# runs its smoke test in each, boots its systemd, and scans it with Trivy.
+# On main it pushes both by digest to ghcr.io/ahimsalabs/kiki-src/agent and
+# joins them into one index, tagged sha-<commit> and latest. That index is
+# a source like any other: publish.yml converts it to native EROFS layers,
+# verifies it and publishes it as ghcr.io/ahimsalabs/kiki/agent.
+#
+# This is the gate of the bump bot's pull requests (bump-agent.yml): make
+# both build jobs required checks of main, or auto-merge does not wait for
+# them.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - images/agent/**
+      - .github/workflows/build-agent.yml
+  pull_request:
+    paths:
+      - images/agent/**
+      - .github/workflows/build-agent.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-agent-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REPO: ghcr.io/ahimsalabs/kiki-src/agent
+  PUSH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build
+        # rewrite-timestamp with versions.env's SOURCE_DATE_EPOCH: a layer
+        # built from the same inputs has the same digest on any runner.
+        run: images/agent/build.sh --provenance=false --sbom=false --output type=docker,name=agent,rewrite-timestamp=true
+      - name: Smoke test
+        run: docker run --rm --privileged --entrypoint sudo agent -u exedev -i /usr/local/share/kiki-agent/smoke.sh
+      - name: Boot systemd
+        # kiki runs the image in systemd mode; a privileged container is
+        # the nearest thing a runner has. Any failed unit fails the job.
+        run: |
+          docker run -d --name boot --privileged --cgroupns=host agent
+          for _ in $(seq 30); do
+            state=$(docker exec boot systemctl is-system-running 2>/dev/null || true)
+            case $state in running | degraded) break ;; esac
+            sleep 1
+          done
+          docker exec boot systemctl --failed --no-legend
+          echo "system: $state"
+          [ "$state" = running ]
+          # docker.socket starts dockerd on first use, as the login user.
+          docker exec -u exedev boot docker info --format 'dockerd {{.ServerVersion}}, {{.Driver}}'
+      - name: Scan
+        # Reported, not enforced: a fix may wait on an upstream release.
+        # The bump bot acts on what the nightly scan of the published image
+        # finds (bump-agent.yml).
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_IGNORE_POLICY: images/agent/trivy-ignore.rego
+        with:
+          image-ref: agent
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          output: trivy.txt
+          exit-code: '0'
+      - name: Summary
+        run: |
+          # Which layers a host already has from the published image: the
+          # same diff_id is the same layer, which a host does not pull again.
+          old=$(docker buildx imagetools inspect "$REPO:latest" --format '{{json .Image}}' 2>/dev/null |
+            jq -r --arg a "${{ matrix.arch }}" '(if has("rootfs") then . else .["linux/" + $a] end).rootfs.diff_ids[]?' || true)
+          new=$(docker image inspect agent --format '{{json .RootFS.Layers}}' | jq -r '.[]')
+          reused=$(comm -12 <(sort <<<"$old") <(sort <<<"$new") | grep -c . || true)
+          {
+            echo "### agent ($(uname -m))"
+            echo "Layers already in \`$REPO:latest\`: $reused of $(grep -c . <<<"$new")."
+            echo '```'
+            docker history --format '{{.Size}}\t{{.CreatedBy}}' agent | cut -c1-120
+            echo '```'
+            echo '#### Fixable HIGH and CRITICAL vulnerabilities'
+            echo '```'
+            cat trivy.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Push
+        if: env.PUSH == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # The same build again, from the builder's cache, pushed by
+          # digest: no tag per architecture, only the index below.
+          images/agent/build.sh --provenance=false --sbom=false \
+            --output "type=image,name=$REPO,push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true" \
+            --metadata-file meta.json
+          digest=$(jq -er '."containerimage.digest"' meta.json)
+          mkdir -p digests
+          echo "$digest" > "digests/${{ matrix.arch }}"
+      - name: Keep the digest
+        if: env.PUSH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+          retention-days: 1
+
+  index:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - name: Join the platforms
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$REPO:sha-$GITHUB_SHA" -t "$REPO:latest" \
+            "$REPO@$(cat digests/amd64)" "$REPO@$(cat digests/arm64)"
+          docker buildx imagetools inspect "$REPO:latest"

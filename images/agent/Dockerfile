@@ -139,10 +139,13 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ARG TARGETARCH
 ARG APT_SNAPSHOT
 
-# Packages, from the Ubuntu archive as it was at APT_SNAPSHOT. The snapshot
-# service is https-only and the base has no CA certificates, so
-# ca-certificates comes first from the live archive, then is replaced by the
-# snapshot's version. A build behind a TLS-intercepting proxy passes its CA
+# Packages, from the Ubuntu archive as it was at APT_SNAPSHOT: the sources
+# name the snapshot's URL until the last layer puts the live ones back. The
+# snapshot service keeps arm64 (ports.ubuntu.com) in the same archive. apt's own
+# Snapshot: option needs the archive's Release file cached, which the later
+# apt layers here do not have. The snapshot service is https-only and the
+# base has no CA certificates, so ca-certificates comes first from the live
+# archive, then is replaced by the snapshot's version. A build behind a TLS-intercepting proxy passes its CA
 # bundle as the build secret "ca" (build.sh does); it is never in a layer.
 # GNU coreutils replaces 26.04's default uutils, so head, ls, cat and the
 # rest behave as agents expect them to; an apt pin keeps later installs
@@ -161,7 +164,11 @@ RUN --mount=type=secret,id=ca,required=false,mode=0444 \
 	export DEBIAN_FRONTEND=noninteractive && \
 	apt-get update -o APT::Update::Error-Mode=any && \
 	apt-get install -y --no-install-recommends ca-certificates && \
-	sed -i "/^Types:/a Snapshot: ${APT_SNAPSHOT}" /etc/apt/sources.list.d/ubuntu.sources && \
+	cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/ubuntu.sources.live && \
+	sed -E -i \
+		-e "s#^URIs: http://(archive|security|ports)\.ubuntu\.com/ubuntu(-ports)?/?\$#URIs: https://snapshot.ubuntu.com/ubuntu/${APT_SNAPSHOT}/#" \
+		/etc/apt/sources.list.d/ubuntu.sources && \
+	! grep -q '^URIs: http:' /etc/apt/sources.list.d/ubuntu.sources && \
 	apt-get update -o APT::Update::Error-Mode=any && \
 	apt-get -y --allow-downgrades dist-upgrade && \
 	printf 'Package: coreutils-from-uutils rust-coreutils\nPin: release *\nPin-Priority: -1\n' \
@@ -350,7 +357,7 @@ ENV PATH=/home/exedev/.cargo/bin:/home/exedev/.npm-global/bin:/home/exedev/.bun/
 # Empty, not absent: systemd reads an absent machine-id as a first boot and
 # presets every unit, re-enabling the ones disabled above. Each VM gets its
 # own ID on first boot. Keep this last, so no later install bakes one in.
-RUN sed -i '/^Snapshot:/d' /etc/apt/sources.list.d/ubuntu.sources && \
+RUN mv /etc/apt/ubuntu.sources.live /etc/apt/sources.list.d/ubuntu.sources && \
 	ldconfig && rm -f /var/cache/ldconfig/aux-cache && \
 	: > /etc/machine-id && \
 	ln -sf /etc/machine-id /var/lib/dbus/machine-id
