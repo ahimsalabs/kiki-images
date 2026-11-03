@@ -1,0 +1,23 @@
+#!/bin/bash
+# Installed as /usr/local/bin/{cargo,rustc,rustup,…}. The image carries the
+# stable toolchain's dist files in /opt/rust-dist, compressed, rather than an
+# installed toolchain: the first call of any of these installs it for the
+# calling user (~/.rustup, ~/.cargo) from that local copy, without the
+# network, and then runs the real command. Later calls find ~/.cargo/bin
+# first on PATH and never come here. rustup itself then updates from
+# static.rust-lang.org as usual.
+set -euo pipefail
+cmd=${0##*/}
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+if [[ ! -x $cargo_home/bin/rustup ]]; then
+	mkdir -p "$cargo_home"
+	exec 9>"$cargo_home/.kiki-first-use.lock"
+	flock 9
+	if [[ ! -x $cargo_home/bin/rustup ]]; then
+		echo "rust: installing the stable toolchain from /opt/rust-dist (first use)" >&2
+		RUSTUP_DIST_SERVER=file:///opt/rust-dist \
+			/usr/local/lib/kiki-agent/rustup-init -y --no-modify-path --profile minimal \
+			--default-toolchain stable --component clippy,rustfmt >&2
+	fi
+fi
+exec "$cargo_home/bin/$cmd" "$@"

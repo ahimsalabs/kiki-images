@@ -1,0 +1,18 @@
+# The agent image's own pins (images/agent/versions.env) are no ecosystem
+# Dependabot knows; bump-agent.yml keeps those.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ['*']

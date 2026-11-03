@@ -8,6 +8,7 @@ converting a tar:
 | --- | --- | --- |
 | `ghcr.io/ahimsalabs/kiki/exeuntu` | [`ghcr.io/boldsoftware/exeuntu`](https://github.com/boldsoftware/exeuntu) `latest` | `latest`, `source-sha256-<source index>` |
 | `ghcr.io/ahimsalabs/kiki/python` | [`python:3.12`](https://hub.docker.com/_/python) | `latest`, `3.12`, `source-sha256-<source index>` |
+| `ghcr.io/ahimsalabs/kiki/agent` | [`ghcr.io/ahimsalabs/kiki-src/agent`](images/agent), built here | `latest`, `source-sha256-<source index>` |
 
 Each is an OCI index for linux/amd64 and linux/arm64. Each layer is containerd's native EROFS
 layer (`mkfs.erofs --tar=f --aufs -Enoinline_data`, the EROFS differ's form), compressed with
@@ -50,6 +51,60 @@ for byte.
   checks that its merged rootfs equals the source's, entry for entry, opening an issue in kiki
   when it does not.
 
+## The agent image
+
+`images/agent` builds an image for coding agents: Ubuntu 26.04 with systemd, run as `exedev`
+with passwordless sudo, and the tools agents reach for: Go, Node.js (npm, pnpm and yarn through
+corepack), Bun, jj, Task, gh, ripgrep, uv, Python, Docker Engine (from Docker's apt repository,
+socket-activated), agent-browser and a headless Chromium that Playwright finds without
+configuration, gcc, g++ and make, jq and common debugging tools. Rust's toolchain ships as its
+compressed dist files: the first `cargo` or `rustc` installs it for the user from them, offline.
+Its other packages all come from Ubuntu's main component, which Ubuntu's security team maintains.
+
+Every input is pinned in `images/agent/versions.env`: the base image by digest, Ubuntu's packages
+by a [snapshot.ubuntu.com](https://snapshot.ubuntu.com) timestamp, Docker's by apt version, and
+each tool by version and sha256 for each architecture, checked as it is downloaded. Each tool is
+fetched in a build stage of its own and copied in with `COPY --link`, and the build rewrites
+every timestamp to `SOURCE_DATE_EPOCH`. So a layer built from the same inputs has the same
+digest on any runner, and a bump changes only its own layers: a new apt snapshot the apt and
+Docker layers, a Go release the Go layer. A host pulls only those.
+
+`.github/workflows/build-agent.yml` builds it natively on amd64 and arm64, runs
+`images/agent/smoke.sh` in it (every tool, an offline Rust build, a page through agent-browser
+and Playwright), boots its systemd, and reports a Trivy scan and how many layers the published
+image already has. On main it pushes the result to `ghcr.io/ahimsalabs/kiki-src/agent`, which
+`publish.yml` then converts and verifies like any other source. Locally, with a docker-container
+builder (`docker buildx create --use`):
+`images/agent/build.sh --output type=docker,name=agent,rewrite-timestamp=true`.
+
+### Keeping it current
+
+`.github/workflows/bump-agent.yml` updates `versions.env` through one pull request (branch
+`bot/agent-bump`), using `cmd/agent-bump`:
+
+- **Weekly**, every tool moves to its newest release at least three days old, and Docker to
+  its repository's newest packages. Its sha256 comes from
+  where its publisher records it: Go's download list, Node.js's `SHASUMS256.txt`, GitHub's asset
+  digests, rustup's `.sha256` files, and the Rust channel manifest. Chrome for Testing publishes
+  none, so the bot records the sha256 of what it downloads and the pull request shows it for
+  review. The base image moves to the tag's current digest and apt to that day's snapshot.
+- **Nightly**, Trivy scans `kiki-src/agent:latest`. A HIGH or CRITICAL vulnerability with a fix
+  bumps only what carries it, without the cooldown: the apt snapshot for Ubuntu's packages,
+  Docker's packages for Docker, the tool for a tool's binary. The scans skip `linux-libc-dev`,
+  the kernel's headers, which trackers mark with every kernel CVE although none of it runs: kiki
+  boots its own kernel (`images/agent/trivy-ignore.rego`). A vulnerability whose fix needs a tool release that doesn't exist
+  yet is tracked in one issue.
+
+`Build agent image` gates the pull request. If every pin moves by at most a patch release, the
+pull request merges itself once that check passes; anything larger waits for a review. A merge
+then builds, converts, verifies and publishes as above. Dependabot keeps the workflows' actions
+and this module's Go dependencies current.
+
+Once, an org admin installs a GitHub App on this repository with contents, pull request and
+issue write. Its ID goes in `vars.AGENT_BOT_APP_ID` and its key in `secrets.AGENT_BOT_PRIVATE_KEY`,
+because pull requests opened with `GITHUB_TOKEN` start no workflows. The admin also allows
+auto-merge and makes both `Build agent image` jobs required checks of `main`.
+
 ## Publishing
 
 `.github/workflows/publish.yml` runs daily and on demand (`gh workflow run publish.yml`, with
@@ -84,6 +139,12 @@ encoding, and the licenses of the software in them apply as they do to the sourc
   Apache-2.0. The image holds Ubuntu packages, each under its own license (see
   `/usr/share/doc/*/copyright` in the image), and the third-party tools exeuntu installs, under
   theirs.
+- **agent** is built here from `images/agent` (Apache-2.0, as this repository). Its systemd
+  configuration is adapted from exeuntu's (see
+  `/usr/local/share/kiki-agent/NOTICE` in the image). The image holds Ubuntu packages, each
+  under its own license (see `/usr/share/doc/*/copyright` in the image), and the release
+  binaries of the tools it installs (Go, Node.js, Bun, jj, Task, gh, ripgrep, uv, agent-browser,
+  Chrome for Testing, rustup and Rust) and Docker Engine's packages, each under its own.
 - **python** is the Docker Official Image [`python`](https://hub.docker.com/_/python), built from
   [docker-library/python](https://github.com/docker-library/python) (MIT). The image holds
   Python (PSF License Agreement) and Debian packages, each under its own license (see
