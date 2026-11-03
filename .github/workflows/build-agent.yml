@@ -82,7 +82,7 @@ jobs:
         # Reported, not enforced: a fix may wait on an upstream release.
         # The bump bot acts on what the nightly scan of the published image
         # finds (bump-agent.yml).
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_IGNORE_POLICY: images/agent/trivy-ignore.rego
         with:

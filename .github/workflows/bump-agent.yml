@@ -103,7 +103,7 @@ jobs:
           fi
       - name: Scan the published image
         if: steps.mode.outputs.mode == 'security'
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_IGNORE_POLICY: images/agent/trivy-ignore.rego
           TRIVY_USERNAME: ${{ github.actor }}
