@@ -23,6 +23,8 @@ jobs:
           tools/build-erofs-utils.sh "$RUNNER_TEMP/erofs-utils"
       - name: Vet
         run: go vet ./...
+      - name: Test agent-bump
+        run: go test ./internal/agentbump ./cmd/agent-bump
       - name: Test
         # As root, TestPublish mounts what it published (Verify).
         run: |

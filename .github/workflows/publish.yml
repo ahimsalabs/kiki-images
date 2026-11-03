@@ -24,6 +24,12 @@ on:
         default: false
   schedule:
     - cron: '23 6 * * *'
+  # The agent image is built here (build-agent.yml): publish it as soon as
+  # a build on main has pushed a new source.
+  workflow_run:
+    workflows: [Build agent image]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -40,6 +46,8 @@ defaults:
 jobs:
   publish:
     name: ${{ matrix.name }}
+    # After a build, only if it succeeded.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
@@ -58,6 +66,10 @@ jobs:
           - name: python
             source: index.docker.io/library/python:3.12
             tags: latest,3.12
+          # kiki's agent image, built in this repository (images/agent).
+          - name: agent
+            source: ghcr.io/ahimsalabs/kiki-src/agent:latest
+            tags: latest
     services:
       stage:
         image: registry:2.8.3
