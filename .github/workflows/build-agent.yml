@@ -62,7 +62,7 @@ jobs:
         # built from the same inputs has the same digest on any runner.
         run: images/agent/build.sh --provenance=false --sbom=false --output type=docker,name=agent,rewrite-timestamp=true
       - name: Smoke test
-        run: docker run --rm --privileged --entrypoint sudo agent -u exedev -i /usr/local/share/kiki-agent/smoke.sh
+        run: docker run --rm --privileged --entrypoint sudo agent -u kikiu -i /usr/local/share/kiki-agent/smoke.sh
       - name: Boot systemd
         # kiki runs the image in systemd mode; a privileged container is
         # the nearest thing a runner has. Any failed unit fails the job.
@@ -77,7 +77,7 @@ jobs:
           echo "system: $state"
           [ "$state" = running ]
           # docker.socket starts dockerd on first use, as the login user.
-          docker exec -u exedev boot docker info --format 'dockerd {{.ServerVersion}}, {{.Driver}}'
+          docker exec -u kikiu boot docker info --format 'dockerd {{.ServerVersion}}, {{.Driver}}'
       - name: Scan
         # Reported, not enforced: a fix may wait on an upstream release.
         # The bump bot acts on what the nightly scan of the published image
