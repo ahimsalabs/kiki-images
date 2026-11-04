@@ -53,7 +53,7 @@ for byte.
 
 ## The agent image
 
-`images/agent` builds an image for coding agents: Ubuntu 26.04 with systemd, run as `exedev`
+`images/agent` builds an image for coding agents: Ubuntu 26.04 with systemd, run as `kikiu`
 with passwordless sudo, and the tools agents reach for: Go, Node.js (npm, pnpm and yarn through
 corepack), Bun, jj, Task, gh, ripgrep, uv, Python, Docker Engine (from Docker's apt repository,
 socket-activated), agent-browser and a headless Chromium that Playwright finds without

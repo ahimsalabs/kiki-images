@@ -1,7 +1,7 @@
 #!/bin/bash
 # Checks, as the login user, that every tool in the image runs. Exits
 # non-zero at the first failure. CI runs it in each built image:
-#   docker run --rm --entrypoint sudo IMAGE -u exedev -i /usr/local/share/kiki-agent/smoke.sh
+#   docker run --rm --entrypoint sudo IMAGE -u kikiu -i /usr/local/share/kiki-agent/smoke.sh
 # The Rust check runs without a network when unshare can make one (CI's
 # privileged runs), to prove the first-use install is offline.
 set -euo pipefail
@@ -9,7 +9,7 @@ cd "$(mktemp -d)"
 step() { printf '\n== %s\n' "$*"; }
 
 step whoami
-test "$(id -un)" = exedev
+test "$(id -un)" = kikiu
 sudo -n true
 
 step apt
