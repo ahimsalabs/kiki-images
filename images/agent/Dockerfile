@@ -197,6 +197,7 @@ RUN --mount=type=secret,id=ca,required=false,mode=0444 \
 		make \
 		netcat-openbsd \
 		openssh-client \
+		openssh-sftp-server \
 		patch \
 		pkg-config \
 		procps \
