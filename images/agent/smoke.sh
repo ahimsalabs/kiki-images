@@ -45,6 +45,12 @@ for t in strace lsof tcpdump ip ping nc dig htop tmux rsync tree zip patch wget 
 done
 echo all present
 
+step sftp-server
+# kiki-guest serves the SFTP subsystem (kiki cp, scp -s, sshfs, editors' remotes) with the image's
+# own sftp-server, the first of its paths in kiki's internal/guestssh: Debian/Ubuntu keep it here.
+test -x /usr/lib/openssh/sftp-server || { echo "missing: /usr/lib/openssh/sftp-server" >&2; exit 1; }
+echo present
+
 step go
 cat >main.go <<'GO'
 package main
